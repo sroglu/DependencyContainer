@@ -24,22 +24,26 @@ nothing but the BCL.
 - **`ServiceBuilder<TImpl>`** — fluent configuration returned by `Register<TImpl>()`
   (`As<TService>`, `WithLifetime`, `WithFactory`).
 - **`ServiceLifetime`** (enum) — `Singleton`, `Scoped`, `Transient`.
-- **`IServiceScope`** (`IDisposable`) — a resolution scope; `Get<T>` / `TryGet<T>`. Scoped services
-  resolve to one instance per scope.
+- **`IServiceScope`** (`IDisposable`) — a resolution scope; generic `Get<T>` / `TryGet<T>` **and**
+  runtime-`Type` `Get(Type)` / `TryGet(Type, out object)`, nested `CreateScope()`, and a `Provider`
+  (`IServiceProvider`) view that resolves within the scope. Scoped services resolve to one instance
+  per scope.
 - **`IInitializableService`** — optional hook; `Initialize()` runs once, right after a service is
   constructed and injected.
 - **`ServiceDescriptor`** (internal) — one registration record; aliases share a single descriptor.
 
 ## Public API
 
-**Registration** (before `Build`, else `InvalidOperationException`):
+**Registration** (before `Build`, else `InvalidOperationException`; a second registration for the
+same service type throws `InvalidOperationException` — duplicates fail fast):
 ```csharp
 ServiceBuilder<TImpl> Register<TImpl>() where TImpl : class;   // Singleton by default
 void RegisterInstance<TService>(TService instance) where TService : class;  // caller-owned
+void RegisterInstance(Type serviceType, object instance);      // runtime-type; throws if instance not assignable to serviceType
 ```
 `ServiceBuilder<TImpl>`:
 ```csharp
-ServiceBuilder<TImpl> As<TService>() where TService : class;   // alias; shared instance for singletons
+ServiceBuilder<TImpl> As<TService>() where TService : class;   // alias; shared instance for singletons — throws if TImpl not assignable to TService
 ServiceBuilder<TImpl> WithLifetime(ServiceLifetime lifetime);
 ServiceBuilder<TImpl> WithFactory(Func<DependencyContainer, TImpl> factory);
 ```
@@ -53,8 +57,20 @@ DependencyContainer Build();   // locks registration, eagerly constructs singlet
 ```csharp
 T Get<T>();                            // throws if unregistered
 bool TryGet<T>(out T service);
+bool TryGet(Type serviceType, out object service);   // runtime-type; false if unregistered
 object GetService(Type serviceType);   // IServiceProvider; null if unregistered
 IServiceScope CreateScope();           // throws before Build()
+```
+
+**`IServiceScope`** (each caches its own `Scoped` instances and tracks its own disposables):
+```csharp
+T Get<T>();                            // throws if unregistered
+bool TryGet<T>(out T service);
+object Get(Type serviceType);          // runtime-type; throws if unregistered
+bool TryGet(Type serviceType, out object service);   // runtime-type; false if unregistered
+IServiceScope CreateScope();           // nested scope over the same registrations/singletons
+IServiceProvider Provider { get; }     // an IServiceProvider view that resolves within this scope
+void Dispose();                        // disposes this scope's created instances (not singletons)
 ```
 
 **Teardown**:
@@ -70,6 +86,10 @@ void Dispose();   // disposes created IDisposables in reverse creation order
 - **Build phase.** `Register(...)` / `RegisterInstance(...)` mutate the graph; `Build()` locks it and
   eagerly constructs every singleton (running each `IInitializableService.Initialize()`). Registering
   after `Build()` throws.
+- **Registration is fail-fast.** A second registration for the same service type throws
+  (no silent last-wins overwrite). `RegisterInstance(Type, object)` throws if the instance is not
+  assignable to the service type, and `As<TService>()` throws if the implementation is not assignable
+  to the alias — assignability is validated at registration, not deferred to resolve.
 - **Constructor selection.** The greediest public constructor whose parameters are ALL registered is
   chosen; if none qualifies, the parameterless constructor is used via `Activator.CreateInstance`.
 - **Circular dependencies fail fast.** A cycle detected while constructing throws
@@ -141,8 +161,8 @@ DependencyContainer/
 ## Limitations / Known Gaps
 - **Main-thread only.** No locking; concurrent resolve/build from other threads is unsupported.
 - **No collection resolution.** Resolving `IEnumerable<T>` / all implementations of a service is not
-  built in — the last registration for a service type wins; register a factory that returns the list
-  if you need many.
+  built in — one descriptor per service type (a duplicate registration throws, it does not overwrite);
+  register a factory that returns the list if you need many.
 - **No open-generic registration.** You register concrete/closed types; `Register<IRepo<>>` is not
   supported.
 - **Constructor injection only.** No property or method injection; use `.WithFactory(...)` for types

@@ -69,7 +69,7 @@ namespace PFound.DependencyContainer
         {
             ThrowIfBuilt();
             var descriptor = new ServiceDescriptor { ImplType = typeof(TImpl), Lifetime = ServiceLifetime.Singleton };
-            _services[typeof(TImpl)] = descriptor;
+            Add(typeof(TImpl), descriptor);
             return new ServiceBuilder<TImpl>(this, descriptor);
         }
 
@@ -78,15 +78,50 @@ namespace PFound.DependencyContainer
         {
             ThrowIfBuilt();
             if (instance == null) throw new ArgumentNullException(nameof(instance));
-            _services[typeof(TService)] = new ServiceDescriptor
+            Add(typeof(TService), new ServiceDescriptor
             {
                 ImplType = instance.GetType(),
                 Lifetime = ServiceLifetime.Singleton,
                 Instance = instance
-            };
+            });
         }
 
-        internal void AddAlias(Type serviceType, ServiceDescriptor descriptor) => _services[serviceType] = descriptor;
+        /// <summary>
+        /// Registers an already-built instance as a singleton under the runtime <paramref name="serviceType"/>
+        /// (the caller owns its lifetime). Throws if <paramref name="instance"/> is not assignable to it.
+        /// </summary>
+        public void RegisterInstance(Type serviceType, object instance)
+        {
+            ThrowIfBuilt();
+            if (serviceType == null) throw new ArgumentNullException(nameof(serviceType));
+            if (instance == null) throw new ArgumentNullException(nameof(instance));
+            if (!serviceType.IsInstanceOfType(instance))
+                throw new InvalidOperationException(
+                    "Instance of type " + instance.GetType().FullName + " is not assignable to " + serviceType.FullName + ".");
+            Add(serviceType, new ServiceDescriptor
+            {
+                ImplType = instance.GetType(),
+                Lifetime = ServiceLifetime.Singleton,
+                Instance = instance
+            });
+        }
+
+        /// <summary>Maps an additional service type to an existing descriptor, validating assignability.</summary>
+        internal void AddAlias(Type serviceType, ServiceDescriptor descriptor)
+        {
+            if (!serviceType.IsAssignableFrom(descriptor.ImplType))
+                throw new InvalidOperationException(
+                    descriptor.ImplType.FullName + " is not assignable to " + serviceType.FullName + ".");
+            Add(serviceType, descriptor);
+        }
+
+        /// <summary>Adds a service-type→descriptor mapping, failing fast on a duplicate registration.</summary>
+        private void Add(Type serviceType, ServiceDescriptor descriptor)
+        {
+            if (_services.ContainsKey(serviceType))
+                throw new InvalidOperationException("Duplicate registration for service type " + serviceType.FullName + ".");
+            _services[serviceType] = descriptor;
+        }
 
         /// <summary>Locks registration and eagerly constructs singletons (running their Initialize hooks).</summary>
         public DependencyContainer Build()
@@ -111,6 +146,14 @@ namespace PFound.DependencyContainer
         {
             if (_services.ContainsKey(typeof(T))) { service = Get<T>(); return true; }
             service = default;
+            return false;
+        }
+
+        /// <summary>Tries to resolve a service by runtime type. Returns false if not registered.</summary>
+        public bool TryGet(Type serviceType, out object service)
+        {
+            if (_services.ContainsKey(serviceType)) { service = GetRequired(serviceType, _rootScoped, _disposables); return true; }
+            service = null;
             return false;
         }
 
@@ -218,7 +261,7 @@ namespace PFound.DependencyContainer
         private void ThrowIfNotBuilt() { if (!_built) throw new InvalidOperationException("Call Build() before creating scopes."); }
         private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(DependencyContainer)); }
 
-        private sealed class ServiceScope : IServiceScope
+        private sealed class ServiceScope : IServiceScope, IServiceProvider
         {
             private readonly DependencyContainer _root;
             private readonly Dictionary<ServiceDescriptor, object> _scoped = new Dictionary<ServiceDescriptor, object>();
@@ -227,14 +270,36 @@ namespace PFound.DependencyContainer
 
             public ServiceScope(DependencyContainer root) { _root = root; }
 
-            public T Get<T>() => (T)_root.GetRequired(typeof(T), _scoped, _disposables);
+            public IServiceProvider Provider => this;
+
+            public T Get<T>() { ThrowIfDisposed(); return (T)_root.GetRequired(typeof(T), _scoped, _disposables); }
 
             public bool TryGet<T>(out T service)
             {
-                if (_root._services.ContainsKey(typeof(T))) { service = Get<T>(); return true; }
+                if (!_disposed && _root._services.ContainsKey(typeof(T))) { service = Get<T>(); return true; }
                 service = default;
                 return false;
             }
+
+            public object Get(Type serviceType) { ThrowIfDisposed(); return _root.GetRequired(serviceType, _scoped, _disposables); }
+
+            public bool TryGet(Type serviceType, out object service)
+            {
+                if (!_disposed && _root._services.ContainsKey(serviceType)) { service = Get(serviceType); return true; }
+                service = null;
+                return false;
+            }
+
+            /// <summary>Resolves within this scope; returns null for an unregistered service (<see cref="IServiceProvider"/> contract).</summary>
+            public object GetService(Type serviceType)
+            {
+                ThrowIfDisposed();
+                return _root._services.ContainsKey(serviceType) ? _root.GetRequired(serviceType, _scoped, _disposables) : null;
+            }
+
+            public IServiceScope CreateScope() { ThrowIfDisposed(); return new ServiceScope(_root); }
+
+            private void ThrowIfDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(ServiceScope)); }
 
             public void Dispose()
             {

@@ -19,6 +19,8 @@ internal static class DependencyContainerTests
     private sealed class Counter { public static int Made; public Counter() { Made++; } }
     private sealed class CycleA { public CycleA(CycleB b) { } }
     private sealed class CycleB { public CycleB(CycleA a) { } }
+    private sealed class Unrelated { }
+    private sealed class ScopedDep : IDisposable { public bool Disposed; public void Dispose() => Disposed = true; }
 
     public static int Main()
     {
@@ -89,6 +91,64 @@ internal static class DependencyContainerTests
         try { ccyc.Build(); ccyc.Get<CycleA>(); }
         catch (InvalidOperationException) { threw = true; }
         Check(threw, "circular dependency throws InvalidOperationException");
+
+        // GAP 1: non-generic RegisterInstance(Type, object) with assignability check
+        var cti = new DependencyContainer();
+        var greeterInst = new Greeter();
+        cti.RegisterInstance(typeof(IGreeter), greeterInst);
+        cti.Build();
+        Check(ReferenceEquals(cti.Get<IGreeter>(), greeterInst), "RegisterInstance(Type,obj): resolves under the runtime type");
+
+        var ctiBad = new DependencyContainer();
+        bool badAssign = false;
+        try { ctiBad.RegisterInstance(typeof(IGreeter), new Unrelated()); }
+        catch (InvalidOperationException) { badAssign = true; }
+        Check(badAssign, "RegisterInstance(Type,obj): throws when instance not assignable to service type");
+
+        // GAP 2: non-generic TryGet(Type, out object)
+        var cnt = new DependencyContainer();
+        cnt.Register<Greeter>().As<IGreeter>();
+        cnt.Build();
+        Check(cnt.TryGet(typeof(IGreeter), out var boxed) && boxed is Greeter, "TryGet(Type,out): resolves a registered service");
+        Check(!cnt.TryGet(typeof(Unrelated), out _), "TryGet(Type,out): false for an unregistered service");
+
+        // GAP 3: duplicate-registration detection
+        var cdup = new DependencyContainer();
+        cdup.Register<Greeter>();
+        bool dupThrew = false;
+        try { cdup.Register<Greeter>(); }
+        catch (InvalidOperationException) { dupThrew = true; }
+        Check(dupThrew, "duplicate registration throws instead of silently overwriting");
+
+        var cdupAlias = new DependencyContainer();
+        cdupAlias.Register<Greeter>().As<IGreeter>();
+        bool dupAliasThrew = false;
+        try { cdupAlias.RegisterInstance<IGreeter>(new Greeter()); }
+        catch (InvalidOperationException) { dupAliasThrew = true; }
+        Check(dupAliasThrew, "duplicate alias/service-type registration throws");
+
+        // GAP 4: widened scope API — non-generic resolve, nested scope, Provider
+        var cw = new DependencyContainer();
+        cw.Register<ScopedDep>().WithLifetime(ServiceLifetime.Scoped);
+        cw.Build();
+        using (var scope = cw.CreateScope())
+        {
+            Check(scope.Get(typeof(ScopedDep)) is ScopedDep, "scope.Get(Type): resolves within the scope");
+            Check(ReferenceEquals(scope.Get(typeof(ScopedDep)), scope.Get<ScopedDep>()), "scope.Get(Type) and Get<T> share the scoped instance");
+            Check(scope.TryGet(typeof(ScopedDep), out var sd) && sd is ScopedDep, "scope.TryGet(Type,out): resolves a registered service");
+            Check(!scope.TryGet(typeof(Unrelated), out _), "scope.TryGet(Type,out): false for an unregistered service");
+            Check(scope.Provider != null && scope.Provider.GetService(typeof(ScopedDep)) is ScopedDep, "scope.Provider resolves within the scope");
+
+            using (var nested = scope.CreateScope())
+                Check(!ReferenceEquals(nested.Get<ScopedDep>(), scope.Get<ScopedDep>()), "nested scope.CreateScope(): independent scoped instance");
+        }
+
+        // GAP 5: As<T> / alias assignability validation
+        var calias = new DependencyContainer();
+        bool aliasThrew = false;
+        try { calias.Register<Greeter>().As<IDisposable>(); }
+        catch (InvalidOperationException) { aliasThrew = true; }
+        Check(aliasThrew, "As<T>: throws when impl not assignable to the alias type");
 
         Console.WriteLine("--------------------------------------------------");
         Console.WriteLine($"PFound.DependencyContainer: passed={s_passed} failed={s_failed}");

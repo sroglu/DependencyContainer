@@ -27,5 +27,17 @@ namespace PFound.DependencyContainer
     {
         T Get<T>();
         bool TryGet<T>(out T service);
+
+        /// <summary>Resolves a service by runtime type within this scope. Throws if not registered.</summary>
+        object Get(Type serviceType);
+
+        /// <summary>Tries to resolve a service by runtime type within this scope. Returns false if not registered.</summary>
+        bool TryGet(Type serviceType, out object service);
+
+        /// <summary>Creates a nested scope sharing the same registrations and singletons.</summary>
+        IServiceScope CreateScope();
+
+        /// <summary>A <see cref="IServiceProvider"/> view that resolves within this scope.</summary>
+        IServiceProvider Provider { get; }
     }
 }
